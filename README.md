@@ -1,4 +1,4 @@
-# Wi-Fi Deauthentication Lab (Educational Only)  
+# Wi-Fi Analysing Lab (Educational Only)  
 
 ⚠️ **Disclaimer**  
 This script is for **educational and research purposes only**.  
