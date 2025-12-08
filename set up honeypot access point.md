@@ -252,3 +252,16 @@ systemctl start NetworkManager
 3. When someone connects and enters password, it will be saved in `/var/www/html/creds.txt`
 
 **⚠️ Legal Warning:** Only use this on networks you own or have explicit permission to test!
+
+
+# Stop fake AP services
+killall dnsmasq hostapd airbase-ng
+
+# Restart NetworkManager
+systemctl unmask NetworkManager
+systemctl start NetworkManager
+
+# Bring interface back to normal
+ip link set wlan0 down
+iw dev wlan0 set type managed
+ip link set wlan0 up
