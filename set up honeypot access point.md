@@ -255,13 +255,17 @@ systemctl start NetworkManager
 
 
 # Stop fake AP services
+```
 killall dnsmasq hostapd airbase-ng
-
+```
 # Restart NetworkManager
+```
 systemctl unmask NetworkManager
 systemctl start NetworkManager
-
+```
 # Bring interface back to normal
+```
 ip link set wlan0 down
 iw dev wlan0 set type managed
 ip link set wlan0 up
+```
