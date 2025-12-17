@@ -188,6 +188,139 @@ SCRIPT
 
 chmod +x setup_honeypot.sh
 ```
+---
+Perfect! Let’s break your captive portal setup into **iptables vs nftables** side by side. I’ll match the steps you’ve done with iptables to their nftables equivalents.
+
+---
+
+## **1️⃣ Flush existing rules**
+
+**iptables:**
+
+```bash
+sudo iptables -F
+sudo iptables -t nat -F
+```
+
+**nftables:**
+
+```bash
+sudo nft flush ruleset
+```
+
+> One command flushes all tables and chains, simpler than iptables’ separate tables.
+
+---
+
+## **2️⃣ Enable IP forwarding**
+
+**Both systems use the same Linux kernel setting:**
+
+```bash
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+```
+
+---
+
+## **3️⃣ NAT / Masquerade**
+
+**iptables:**
+
+```bash
+sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+```
+
+**nftables:**
+
+```bash
+sudo nft add table ip nat
+sudo nft 'add chain ip nat postrouting { type nat hook postrouting priority 100; }'
+sudo nft add rule ip nat postrouting oifname "eth0" masquerade
+```
+
+> You explicitly define table → chain → hook → rule in nftables.
+
+---
+
+## **4️⃣ Forwarding rules**
+
+**iptables:**
+
+```bash
+sudo iptables -A FORWARD -i eth0 -o wlan0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -A FORWARD -i wlan0 -o eth0 -j REJECT --reject-with icmp-host-prohibited
+```
+
+**nftables:**
+
+```bash
+sudo nft add table ip filter
+sudo nft 'add chain ip filter forward { type filter hook forward priority 0; policy drop; }'
+
+# Allow established/related from eth0 → wlan0
+sudo nft add rule ip filter forward iif "eth0" oif "wlan0" ct state related,established accept
+
+# Reject other wlan0 → eth0 traffic by default
+sudo nft add rule ip filter forward iif "wlan0" oif "eth0" reject with icmp type host-prohibited
+```
+
+> In nftables, you define a **default policy** for the chain (`policy drop` here), then allow exceptions.
+
+---
+
+## **5️⃣ Redirect all HTTP traffic to portal**
+
+**iptables:**
+
+```bash
+sudo iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 80 -j DNAT --to-destination 10.0.0.1
+```
+
+**nftables:**
+
+```bash
+sudo nft add rule ip nat prerouting iif "wlan0" tcp dport 80 dnat to 10.0.0.1
+```
+
+> Same logic, syntax is shorter but requires table & chain setup first.
+
+---
+
+## **6️⃣ User-defined “authenticated” chain**
+
+**iptables:**
+
+```bash
+sudo iptables -N AUTHENTICATED
+sudo iptables -A FORWARD -i wlan0 -o eth0 -j AUTHENTICATED
+```
+
+**nftables:**
+
+```bash
+sudo nft add chain ip filter authenticated { type filter hook forward priority 1; }
+
+# Jump traffic from wlan0 → eth0 through authenticated chain
+sudo nft add rule ip filter forward iif "wlan0" oif "eth0" jump authenticated
+```
+
+> You still have a custom chain, but in nftables everything is tied to a table and chain explicitly.
+
+---
+
+✅ **Summary:**
+
+* nftables = **table → chain → rule**, explicit and unified.
+* iptables = simpler one-liners, separate tables (`filter`, `nat`, `mangle`).
+* Conceptually they do the same thing, but nftables is more **structured** and consistent for IPv4/IPv6.
+
+---
+
+If you want, I can **write a complete nftables script for your captive portal setup** that mirrors exactly your iptables one. That way you can literally copy-paste it and it will work like your current setup.
+
+Do you want me to do that?
+
+
 
 ---
 
@@ -409,6 +542,144 @@ PYTHON
 ```
 
 ---
+### express version portal scripts
+```js
+// portal_server.js
+import express from "express";
+import fs from "fs";
+import { execSync } from "child_process";
+
+const app = express();
+const PORT = 80;
+const AUTH_FILE = "/tmp/authenticated_clients.json";
+
+// Helper functions
+function loadAuthenticated() {
+  if (fs.existsSync(AUTH_FILE)) {
+    return JSON.parse(fs.readFileSync(AUTH_FILE));
+  }
+  return {};
+}
+
+function saveAuthenticated(data) {
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
+}
+
+function whitelistClient(ip) {
+  try {
+    const checkCmd = `sudo iptables -L AUTHENTICATED -n | grep ${ip}`;
+    try {
+      execSync(checkCmd, { stdio: "ignore" });
+      return true; // already whitelisted
+    } catch {
+      const cmd = `sudo iptables -I AUTHENTICATED -s ${ip} -j ACCEPT`;
+      execSync(cmd);
+      console.log(`[AUTH] ✓ Whitelisted ${ip}`);
+      return true;
+    }
+  } catch (e) {
+    console.log(`[AUTH] ✗ Failed: ${e}`);
+    return false;
+  }
+}
+
+// Serve portal page
+app.get("/", (req, res) => {
+  const clientIP = req.ip.replace("::ffff:", ""); // handle IPv4-mapped IPv6
+  const authData = loadAuthenticated();
+  const authCount = Object.keys(authData).length;
+
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>Free WiFi Portal</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+          body { font-family: Arial; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+          .portal { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 40px rgba(0,0,0,0.2); max-width: 400px; width: 100%; }
+          h1 { color: #333; text-align: center; }
+          .subtitle { text-align: center; color: #666; margin-bottom: 30px; }
+          input { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; }
+          button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 30px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 10px; }
+          .info { margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #999; text-align: center; }
+      </style>
+  </head>
+  <body>
+      <div class="portal">
+          <h1>🌐 Free Public WiFi</h1>
+          <p class="subtitle">Get online in seconds</p>
+          <form action="/login" method="GET">
+              <input type="text" name="name" placeholder="Your Name" required>
+              <input type="email" name="email" placeholder="Email Address" required>
+              <button type="submit">🚀 Connect Now</button>
+          </form>
+          <div class="info">
+              <p>Your IP: <strong>${clientIP}</strong></p>
+              <p>Users online: <strong>${authCount}</strong></p>
+          </div>
+      </div>
+  </body>
+  </html>
+  `;
+
+  res.send(html);
+});
+
+// Handle login
+app.get("/login", (req, res) => {
+  const clientIP = req.ip.replace("::ffff:", "");
+  const { name, email } = req.query;
+
+  if (name && email) {
+    if (whitelistClient(clientIP)) {
+      const authData = loadAuthenticated();
+      authData[clientIP] = { name, email };
+      saveAuthenticated(authData);
+
+      const successHTML = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <title>Connected!</title>
+          <meta http-equiv="refresh" content="3;url=http://google.com">
+          <style>
+              body { font-family: Arial; text-align: center; padding: 50px; background: #4CAF50; color: white; }
+              .success { background: white; color: #4CAF50; padding: 40px; border-radius: 10px; max-width: 400px; margin: 0 auto; }
+              h1 { font-size: 48px; margin: 0; }
+          </style>
+      </head>
+      <body>
+          <div class="success">
+              <h1>✓</h1>
+              <h2>Connected!</h2>
+              <p>Welcome, ${name}</p>
+              <p>Redirecting...</p>
+          </div>
+      </body>
+      </html>
+      `;
+      res.send(successHTML);
+      return;
+    }
+  }
+
+  res.redirect("/"); // fallback to main portal
+});
+
+// Start server
+app.listen(PORT, () => {
+  if (!fs.existsSync(AUTH_FILE)) saveAuthenticated({});
+  console.log(`
+╔═══════════════════════════════════════╗
+║   CAPTIVE PORTAL SERVER RUNNING       ║
+╚═══════════════════════════════════════╝
+Portal: http://10.0.0.1/
+Auth log: ${AUTH_FILE}
+Press Ctrl+C to stop
+  `);
+});
+```
 
 ## Management Commands
 
