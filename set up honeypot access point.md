@@ -189,6 +189,35 @@ SCRIPT
 chmod +x setup_honeypot.sh
 ```
 ---
+
+```bash
+# Flush old rules
+sudo nft flush ruleset
+
+# Create base table and chains
+sudo nft add table inet filter
+sudo nft add chain inet filter INPUT { type filter hook input priority 0 \; policy accept \; }
+sudo nft add chain inet filter FORWARD { type filter hook forward priority 0 \; policy drop \; }
+sudo nft add chain inet filter OUTPUT { type filter hook output priority 0 \; policy accept \; }
+
+# Authenticated chain
+sudo nft add chain inet filter AUTHENTICATED { type filter hook forward priority 0 \; }
+
+# Allow forwarding from authenticated clients
+sudo nft add rule inet filter FORWARD iif "wlan0" oif "eth0" jump AUTHENTICATED
+sudo nft add rule inet filter FORWARD iif "eth0" oif "wlan0" ct state related,established accept
+
+# Masquerade outgoing
+sudo nft add table ip nat
+sudo nft add chain ip nat POSTROUTING { type nat hook postrouting priority 100 \; }
+sudo nft add rule ip nat POSTROUTING oif "eth0" masquerade
+
+# Default reject for unauthenticated
+sudo nft add rule inet filter FORWARD iif "wlan0" oif "eth0" reject with icmp host-prohibited
+
+```
+
+---
 Perfect! Let’s break your captive portal setup into **iptables vs nftables** side by side. I’ll match the steps you’ve done with iptables to their nftables equivalents.
 
 ---
@@ -548,137 +577,102 @@ PYTHON
 import express from "express";
 import fs from "fs";
 import { execSync } from "child_process";
+import path from "path";
 
 const app = express();
 const PORT = 80;
 const AUTH_FILE = "/tmp/authenticated_clients.json";
 
-// Helper functions
+// Load or create authenticated clients JSON
 function loadAuthenticated() {
-  if (fs.existsSync(AUTH_FILE)) {
-    return JSON.parse(fs.readFileSync(AUTH_FILE));
-  }
-  return {};
+    if (fs.existsSync(AUTH_FILE)) {
+        return JSON.parse(fs.readFileSync(AUTH_FILE));
+    }
+    return {};
 }
 
 function saveAuthenticated(data) {
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
 }
 
+// Whitelist a client IP in nftables
 function whitelistClient(ip) {
-  try {
-    const checkCmd = `sudo iptables -L AUTHENTICATED -n | grep ${ip}`;
     try {
-      execSync(checkCmd, { stdio: "ignore" });
-      return true; // already whitelisted
-    } catch {
-      const cmd = `sudo iptables -I AUTHENTICATED -s ${ip} -j ACCEPT`;
-      execSync(cmd);
-      console.log(`[AUTH] ✓ Whitelisted ${ip}`);
-      return true;
+        const check = execSync(`sudo nft list chain inet filter AUTHENTICATED | grep ${ip}`, { stdio: 'pipe' }).toString();
+        if (!check) {
+            execSync(`sudo nft insert rule inet filter AUTHENTICATED ip saddr ${ip} accept`);
+            console.log(`[AUTH] ✓ Whitelisted ${ip}`);
+        }
+        return true;
+    } catch (err) {
+        console.log(`[AUTH] ✗ Failed: ${err}`);
+        return false;
     }
-  } catch (e) {
-    console.log(`[AUTH] ✗ Failed: ${e}`);
-    return false;
-  }
 }
 
-// Serve portal page
+// Serve the portal HTML
 app.get("/", (req, res) => {
-  const clientIP = req.ip.replace("::ffff:", ""); // handle IPv4-mapped IPv6
-  const authData = loadAuthenticated();
-  const authCount = Object.keys(authData).length;
+    const clientIP = req.ip.replace("::ffff:", "");
+    const authCount = Object.keys(loadAuthenticated()).length;
 
-  const html = `
-  <!DOCTYPE html>
-  <html>
-  <head>
-      <title>Free WiFi Portal</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
-          body { font-family: Arial; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-          .portal { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 40px rgba(0,0,0,0.2); max-width: 400px; width: 100%; }
-          h1 { color: #333; text-align: center; }
-          .subtitle { text-align: center; color: #666; margin-bottom: 30px; }
-          input { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; }
-          button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 30px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 10px; }
-          .info { margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #999; text-align: center; }
-      </style>
-  </head>
-  <body>
-      <div class="portal">
-          <h1>🌐 Free Public WiFi</h1>
-          <p class="subtitle">Get online in seconds</p>
-          <form action="/login" method="GET">
-              <input type="text" name="name" placeholder="Your Name" required>
-              <input type="email" name="email" placeholder="Email Address" required>
-              <button type="submit">🚀 Connect Now</button>
-          </form>
-          <div class="info">
-              <p>Your IP: <strong>${clientIP}</strong></p>
-              <p>Users online: <strong>${authCount}</strong></p>
-          </div>
-      </div>
-  </body>
-  </html>
-  `;
-
-  res.send(html);
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Free WiFi Portal</title>
+        <style>
+            body { font-family: Arial; text-align:center; padding:50px; background:#667eea; color:white;}
+            input, button { padding:12px; margin:5px; border-radius:8px;}
+        </style>
+    </head>
+    <body>
+        <h1>🌐 Free WiFi</h1>
+        <form action="/login" method="GET">
+            <input type="text" name="name" placeholder="Your Name" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <button type="submit">Connect</button>
+        </form>
+        <p>Your IP: ${clientIP}</p>
+        <p>Users online: ${authCount}</p>
+    </body>
+    </html>
+    `);
 });
 
-// Handle login
+// Handle login and whitelist client
 app.get("/login", (req, res) => {
-  const clientIP = req.ip.replace("::ffff:", "");
-  const { name, email } = req.query;
+    const clientIP = req.ip.replace("::ffff:", "");
+    const { name, email } = req.query;
 
-  if (name && email) {
-    if (whitelistClient(clientIP)) {
-      const authData = loadAuthenticated();
-      authData[clientIP] = { name, email };
-      saveAuthenticated(authData);
+    if (name && email && whitelistClient(clientIP)) {
+        const authData = loadAuthenticated();
+        authData[clientIP] = { name, email };
+        saveAuthenticated(authData);
 
-      const successHTML = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-          <title>Connected!</title>
-          <meta http-equiv="refresh" content="3;url=http://google.com">
-          <style>
-              body { font-family: Arial; text-align: center; padding: 50px; background: #4CAF50; color: white; }
-              .success { background: white; color: #4CAF50; padding: 40px; border-radius: 10px; max-width: 400px; margin: 0 auto; }
-              h1 { font-size: 48px; margin: 0; }
-          </style>
-      </head>
-      <body>
-          <div class="success">
-              <h1>✓</h1>
-              <h2>Connected!</h2>
-              <p>Welcome, ${name}</p>
-              <p>Redirecting...</p>
-          </div>
-      </body>
-      </html>
-      `;
-      res.send(successHTML);
-      return;
+        res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Connected!</title>
+            <meta http-equiv="refresh" content="3;url=http://google.com">
+            <style>
+                body { font-family: Arial; text-align:center; padding:50px; background:#4CAF50; color:white; }
+            </style>
+        </head>
+        <body>
+            <h1>✓ Connected!</h1>
+            <p>Welcome, ${name}</p>
+            <p>Redirecting...</p>
+        </body>
+        </html>
+        `);
+    } else {
+        res.redirect("/");
     }
-  }
-
-  res.redirect("/"); // fallback to main portal
 });
 
-// Start server
-app.listen(PORT, () => {
-  if (!fs.existsSync(AUTH_FILE)) saveAuthenticated({});
-  console.log(`
-╔═══════════════════════════════════════╗
-║   CAPTIVE PORTAL SERVER RUNNING       ║
-╚═══════════════════════════════════════╝
-Portal: http://10.0.0.1/
-Auth log: ${AUTH_FILE}
-Press Ctrl+C to stop
-  `);
-});
+app.listen(PORT, () => console.log(`Captive portal running at http://10.0.0.1/`));
+
 ```
 
 ## Management Commands
